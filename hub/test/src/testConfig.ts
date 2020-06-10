@@ -1,11 +1,13 @@
 
-import test from 'tape-promise/tape'
+import test = require('tape-promise/tape')
 import * as config from '../../src/server/config'
+import * as path from 'path'
 
 
 export function testConfig() {
 
   const configDir = `${__dirname}/../data`
+  const schemaFilePath = path.normalize(`${__dirname}/../../config-schema.json`)
 
   test('initial defaults', (t) => {
     const configResult = config.getConfig()
@@ -13,6 +15,79 @@ export function testConfig() {
     t.end()
   })
 
+  test('config schema does not warn on valid config', (t) => {
+    let msg = ''
+    const configObj = {
+      driver: 'azure',
+      port: 12345
+    }
+    config.validateConfigSchema(schemaFilePath, configObj, warning => {
+      msg += warning
+    })
+    t.equals(msg, '', 'Should have correct schema warning')
+    t.end()
+  })
+
+  test('config schema warning for required params', (t) => {
+    let msg = ''
+    config.validateConfigSchema(schemaFilePath, {}, warning => {
+      msg += warning
+    })
+    t.equals(msg, 
+      'Config schema validation warning: config.driver is a required property, config.port is a required property', 
+      'Should have correct schema warning')
+    t.end()
+  })
+
+  test('config schema warning for extra unused param', (t) => {
+    let msg = ''
+    const configObj = {
+      driver: 'azure',
+      port: 12345,
+      typo: 'asdf'
+    }
+    config.validateConfigSchema(schemaFilePath, configObj, warning => {
+      msg += warning
+    })
+    t.equals(msg, 
+      'Config schema validation warning: config[\'typo\'] is an invalid additional property', 
+      'Should have correct schema warning')
+    t.end()
+  })
+
+  test('config schema warning for missing schema file', (t) => {
+    let msg = ''
+    config.validateConfigSchema('missing-schema-file.json', {}, warning => {
+      msg += warning
+    })
+    t.equals(msg, 
+      'Could not find config schema file at missing-schema-file.json', 
+      'Should have correct schema warning')
+    t.end()
+  })
+
+  test('config schema warning for invalid schema json file', (t) => {
+    let msg = ''
+    config.validateConfigSchema(__filename, {}, warning => {
+      msg += warning
+    })
+    t.equals(msg, 
+      'Error reading config schema JSON file: SyntaxError: Unexpected token i in JSON at position 1', 
+      'Should have correct schema warning')
+    t.end()
+  })
+
+  test('config schema warning for invalid schema definition file', (t) => {
+    let msg = ''
+    const invalidSchemaDefFile = path.normalize(`${configDir}/invalid-schema-def.json`)
+    config.validateConfigSchema(invalidSchemaDefFile, {}, warning => {
+      msg += warning
+    })
+    t.equals(msg, 
+      'Error validating config schema JSON file: Error: schema is invalid: data.additionalProperties should be object,boolean', 
+      'Should have correct schema warning')
+    t.end()
+  })
 
   test('read envvar with parseInt or parseList', (t) => {
     process.env.GAIA_PAGE_SIZE = '1003'
@@ -162,6 +237,62 @@ export function testConfig() {
     delete process.env.GAIA_S3_SESSION_TOKEN
 
     process.env.CONFIG_PATH = configOriginal
+    t.end()
+  })
+
+  test('test https env var config', t => {
+    process.env.GAIA_HTTPS_PORT = '455'
+    process.env.GAIA_ENABLE_HTTPS = 'acme'
+    process.env.GAIA_ACME_CONFIG_EMAIL = 'test@example.com'
+    process.env.GAIA_ACME_CONFIG_AGREE_TOS = 'true'
+    process.env.GAIA_ACME_CONFIG_CONFIG_DIR = './test/config/dir'
+    process.env.GAIA_ACME_CONFIG_SECURITY_UPDATES = 'false'
+    process.env.GAIA_ACME_CONFIG_SERVERNAME = 'test.example.com'
+    process.env.GAIA_ACME_CONFIG_APPROVE_DOMAINS = 'other.example.com'
+    process.env.GAIA_TLS_CERT_CONFIG_KEY_FILE = '/test/cert/key.pem'
+    process.env.GAIA_TLS_CERT_CONFIG_CERT_FILE = '/test/cert/cert.pem'
+    process.env.GAIA_TLS_CERT_CONFIG_KEY_PASSPHRASE = 'test-pem-password'
+    process.env.GAIA_TLS_CERT_CONFIG_PFX_FILE = '/test/cert/server.pfx'
+    process.env.GAIA_TLS_CERT_CONFIG_PFX_PASSPHRASE = 'test-pfx-password'
+
+    try {
+      let configResult = config.getConfig()
+      const expected = Object.assign({}, config.getConfigDefaults(), { 
+        httpsPort: 455,
+        enableHttps: 'acme',
+        acmeConfig: {
+          email: 'test@example.com',
+          agreeTos: true,
+          configDir: './test/config/dir',
+          securityUpdates: false,
+          servername: 'test.example.com',
+          approveDomains: ['other.example.com']
+        },
+        tlsCertConfig: {
+          keyFile: '/test/cert/key.pem',
+          certFile: '/test/cert/cert.pem',
+          keyPassphrase: 'test-pem-password',
+          pfxFile: '/test/cert/server.pfx',
+          pfxPassphrase: 'test-pfx-password'
+        }
+      })
+      t.deepEqual(configResult, expected, 'tls config contains envvar values')
+    } finally {
+      delete process.env.GAIA_HTTPS_PORT
+      delete process.env.GAIA_ENABLE_HTTPS
+      delete process.env.GAIA_ACME_CONFIG_EMAIL
+      delete process.env.GAIA_ACME_CONFIG_AGREE_TOS
+      delete process.env.GAIA_ACME_CONFIG_CONFIG_DIR
+      delete process.env.GAIA_ACME_CONFIG_SECURITY_UPDATES
+      delete process.env.GAIA_ACME_CONFIG_SERVERNAME
+      delete process.env.GAIA_ACME_CONFIG_APPROVE_DOMAINS
+      delete process.env.GAIA_TLS_CERT_CONFIG_KEY_FILE
+      delete process.env.GAIA_TLS_CERT_CONFIG_CERT_FILE
+      delete process.env.GAIA_TLS_CERT_CONFIG_KEY_PASSPHRASE
+      delete process.env.GAIA_TLS_CERT_CONFIG_PFX_FILE
+      delete process.env.GAIA_TLS_CERT_CONFIG_PFX_PASSPHRASE
+    }
+
     t.end()
   })
 

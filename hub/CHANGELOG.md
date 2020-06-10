@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0]
+### Added
+- Return ETag in response body of all requests.
+- Read ETag value from If-Match request header and conditionally approve
+  write requests if the value is up to date for optimistic concurrency control.
+- Read the If-None-Match request header to conditionally approve a file overwrite.
+- New explicit error for requests that fail to provide an up to date ETag in
+  the If-Match header (412 Precondition Failed Error), or an `*` in the If-None-Match
+  header.
+### Changed
+- Updated DriverModel's WriteResult type to include ETag.
+
+## [2.7.0]
+### Added
+- Support for running an `https` server by providing the TLS/SSL certs. 
+- Support for running an `https` server with Automatic Certificate Management 
+  Environment (ACME) via `Let's Encrypt (TM)`. 
+### Changed
+- Modify the default `cacheControl` setting from `public, max-age=1` to `no-cache`.
+
+## [2.6.0]
+### Added
+- Implemented the `putFileArchival` restrictive auth scope which causes any 
+  file modifications such as `POST /store/...` or `DELETE /delete/...` to 
+  "backup" the original file by using a historical naming scheme. For example, 
+  a file write to `{address}/foo/bar/photo.png` will cause the original
+  file, if it exists, to be renamed to 
+  `{address}/foo/bar/.history.{timestamp}.{guid}.photo.png`. 
+- The `/list-files/${address}` endpoint now returns file metadata 
+  (last modified date, content length) if the `POST` body contains 
+  a `stat: true` option. 
+- Implemented `readFile` and `fileStat` methods on all drivers, however, 
+  these are not yet in use or publicly exposed via any endpoints. 
+- The max file upload size is configurable and reported in `GET /hub_info`. 
+### Changed
+- Concurrent requests to modify a resource using the `/store/${address}/...`
+  or `/delete/${address}/...` endpoints are now always rejected with a 
+  `HTTP 409 Conflict` error. Previously, this was undefined behavior
+  that the back-end storage drivers dealt with in different ways. 
+- The `Access-Control-Max-Age` header for preflight CORs OPTION responses
+  set to 24 hours. 
+
+
 ## [2.5.3]
 ### Fixed
 - LRUCache count evictions is no longer overestimated. 

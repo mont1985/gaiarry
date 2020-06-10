@@ -1,10 +1,10 @@
-//@ts-ignore
 import { validateProofs, verifyProfileToken } from 'blockstack'
 import { logger } from './utils'
 import fetch from 'node-fetch'
 
 import { NotEnoughProofError } from './errors'
 import { ProofCheckerConfigInterface } from './config'
+import { getTokenPayload } from './authentication'
 
 export class ProofChecker {
   proofsRequired: number
@@ -24,8 +24,8 @@ export class ProofChecker {
     const result = await fetch(url)
     const json = await result.json()
     const token = json[0].token
-    const verified = await verifyProfileToken(token, address)
-    return verified.payload.claim
+    const verified = verifyProfileToken(token, address)
+    return getTokenPayload(verified).claim
   }
 
   validEnough(validProofs: Array<any>) {

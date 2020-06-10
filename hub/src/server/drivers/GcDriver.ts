@@ -1,9 +1,12 @@
 import { Storage, File } from '@google-cloud/storage'
 
 import { BadPathError, InvalidInputError, DoesNotExist } from '../errors'
-import { ListFilesResult, PerformWriteArgs, PerformDeleteArgs } from '../driverModel'
-import { DriverStatics, DriverModel, DriverModelTestMethods } from '../driverModel'
-import { pipeline, logger } from '../utils'
+import { 
+  ListFilesResult, PerformWriteArgs, WriteResult, PerformDeleteArgs, PerformRenameArgs,
+  StatResult, PerformStatArgs, PerformReadArgs, ReadResult, PerformListFilesArgs,
+  ListFilesStatResult, ListFileStatResult, DriverStatics, DriverModel, DriverModelTestMethods 
+} from '../driverModel'
+import { pipelineAsync, logger, dateToUnixTimeSeconds } from '../utils'
 
 export interface GC_CONFIG_TYPE {
   gcCredentials?: {
@@ -28,6 +31,8 @@ class GcDriver implements DriverModel, DriverModelTestMethods {
   cacheControl?: string
   initPromise: Promise<void>
   resumable: boolean
+
+  supportsETagMatching = false;
 
   static getConfigInformation() {
     const envVars: any = {}
@@ -79,7 +84,7 @@ class GcDriver implements DriverModel, DriverModelTestMethods {
 
   static isPathValid(path: string){
     // for now, only disallow double dots.
-    return (path.indexOf('..') === -1)
+    return !path.includes('..')
   }
 
   getReadURLPrefix () {
@@ -106,7 +111,7 @@ class GcDriver implements DriverModel, DriverModelTestMethods {
   }
 
   async deleteEmptyBucket() {
-    const files = await this.listFiles('')
+    const files = await this.listFiles({pathPrefix: ''})
     if (files.entries.length > 0) {
       /* istanbul ignore next */
       throw new Error('Tried deleting non-empty bucket')
@@ -122,7 +127,7 @@ class GcDriver implements DriverModel, DriverModelTestMethods {
       pageToken: page || undefined
     }
 
-    const result: any = await new Promise((resolve, reject) => {
+    const getFilesResult = await new Promise<{files: File[], nextQuery: any}>((resolve, reject) => {
       this.storage
         .bucket(this.bucket)
         .getFiles(opts, (err, files, nextQuery) => {
@@ -133,24 +138,47 @@ class GcDriver implements DriverModel, DriverModelTestMethods {
           }
         })
     })
-
-    const files: File[] = result.files
-    const nextQuery: any = result.nextQuery
-
-    const fileNames = files.map(file => file.name.slice(prefix.length + 1))
-    const ret: ListFilesResult = {
-      entries: fileNames,
-      page: (nextQuery && nextQuery.pageToken) || null
+    const fileEntries = getFilesResult.files.map(file => {
+      return {
+        name: file.name.slice(prefix.length + 1),
+        file: file
+      }
+    })
+    const result = {
+      entries: fileEntries,
+      page: (getFilesResult.nextQuery && getFilesResult.nextQuery.pageToken) || null
     }
-    return ret
+    return result
   }
 
-  listFiles(prefix: string, page?: string) {
+  async listFiles(args: PerformListFilesArgs): Promise<ListFilesResult> {
     // returns {'entries': [...], 'page': next_page}
-    return this.listAllObjects(prefix, page)
+    const listResult = await this.listAllObjects(args.pathPrefix, args.page)
+    const result: ListFilesResult = {
+      page: listResult.page,
+      entries: listResult.entries.map(file => file.name)
+    }
+    return result
   }
 
-  async performWrite(args: PerformWriteArgs): Promise<string> {
+  async listFilesStat(args: PerformListFilesArgs): Promise<ListFilesStatResult> {
+    const listResult = await this.listAllObjects(args.pathPrefix, args.page)
+    const result: ListFilesStatResult = {
+      page: listResult.page,
+      entries: listResult.entries.map(entry => {
+        const statResult = GcDriver.parseFileMetadataStat(entry.file.metadata)
+        const entryResult: ListFileStatResult = {
+          ...statResult,
+          name: entry.name,
+          exists: true
+        }
+        return entryResult
+      })
+    }
+    return result
+  }
+
+  async performWrite(args: PerformWriteArgs): Promise<WriteResult> {
     if (!GcDriver.isPathValid(args.path)) {
       throw new BadPathError('Invalid Path')
     }
@@ -189,15 +217,15 @@ class GcDriver implements DriverModel, DriverModelTestMethods {
     })
 
     try {
-      await pipeline(args.stream, fileWriteStream)
+      await pipelineAsync(args.stream, fileWriteStream)
       logger.debug(`storing ${filename} in bucket ${this.bucket}`)
+      const etag = GcDriver.formatETagFromMD5(fileDestination.metadata.md5Hash)
+      return { publicURL, etag }
     } catch (error) {
       logger.error(`failed to store ${filename} in bucket ${this.bucket}`)
       throw new Error('Google cloud storage failure: failed to store' +
         ` ${filename} in bucket ${this.bucket}: ${error}`)
     }
-
-    return publicURL
   }
 
   async performDelete(args: PerformDeleteArgs): Promise<void> {
@@ -222,7 +250,113 @@ class GcDriver implements DriverModel, DriverModelTestMethods {
         ` ${filename} in bucket ${this.bucket}: ${error}`)
     }
   }
-  
+
+  static formatETagFromMD5(md5Hash: string): string {
+    const hex = Buffer.from(md5Hash, 'base64').toString('hex')
+    const formatted = `"${hex}"`
+    return formatted
+  }
+
+  static parseFileMetadataStat(metadata: any): StatResult {
+    const lastModified = dateToUnixTimeSeconds(new Date(metadata.updated))
+    const result: StatResult = {
+      exists: true,
+      etag: this.formatETagFromMD5(metadata.md5Hash),
+      contentType: metadata.contentType,
+      contentLength: parseInt(metadata.size),
+      lastModifiedDate: lastModified
+    }
+    return result
+  }
+
+  async performRead(args: PerformReadArgs): Promise<ReadResult> {
+    if (!GcDriver.isPathValid(args.path)) {
+      throw new BadPathError('Invalid Path')
+    }
+    const filename = `${args.storageTopLevel}/${args.path}`
+    const bucketFile = this.storage
+      .bucket(this.bucket)
+      .file(filename)
+    try {
+      const [getResult] = await bucketFile.get({autoCreate: false})
+      const statResult = GcDriver.parseFileMetadataStat(getResult.metadata)
+      const dataStream = getResult.createReadStream()
+      const result: ReadResult = {
+        ...statResult,
+        exists: true,
+        data: dataStream
+      }
+      return result
+    } catch (error) {
+      if (error.code === 404) {
+        throw new DoesNotExist('File does not exist')
+      }
+      /* istanbul ignore next */
+      logger.error(`failed to read ${filename} in bucket ${this.bucket}`)
+      /* istanbul ignore next */
+      throw new Error('Google cloud storage failure: failed to read' +
+        ` ${filename} in bucket ${this.bucket}: ${error}`)
+    }
+  }
+
+  async performStat(args: PerformStatArgs): Promise<StatResult> {
+    if (!GcDriver.isPathValid(args.path)) {
+      throw new BadPathError('Invalid Path')
+    }
+    const filename = `${args.storageTopLevel}/${args.path}`
+    const bucketFile = this.storage
+      .bucket(this.bucket)
+      .file(filename)
+    try {
+      const [metadataResult] = await bucketFile.getMetadata()
+      const result = GcDriver.parseFileMetadataStat(metadataResult)
+      return result
+    } catch (error) {
+      if (error.code === 404) {
+        const result = {
+          exists: false
+        } as StatResult
+        return result
+      }
+      /* istanbul ignore next */
+      logger.error(`failed to stat ${filename} in bucket ${this.bucket}`)
+      /* istanbul ignore next */
+      throw new Error('Google cloud storage failure: failed to stat ' +
+        ` ${filename} in bucket ${this.bucket}: ${error}`)
+    }
+  }
+
+  async performRename(args: PerformRenameArgs): Promise<void> {
+    if (!GcDriver.isPathValid(args.path)) {
+      throw new BadPathError('Invalid original path')
+    }
+    if (!GcDriver.isPathValid(args.newPath)) {
+      throw new BadPathError('Invalid new path')
+    }
+
+    const filename = `${args.storageTopLevel}/${args.path}`
+    const bucketFile = this.storage
+      .bucket(this.bucket)
+      .file(filename)
+
+    const newFilename = `${args.storageTopLevel}/${args.newPath}`
+    const newBucketFile = this.storage
+      .bucket(this.bucket)
+      .file(newFilename)
+
+    try {
+      await bucketFile.move(newBucketFile)
+    } catch (error) {
+      if (error.code === 404) {
+        throw new DoesNotExist('File does not exist')
+      }
+      /* istanbul ignore next */
+      logger.error(`failed to rename ${filename} to ${newFilename} in bucket ${this.bucket}`)
+      /* istanbul ignore next */
+      throw new Error('Google cloud storage failure: failed to rename' +
+        ` ${filename} to ${newFilename} in bucket ${this.bucket}: ${error}`)
+    }
+  }
 }
 
 const driver: typeof GcDriver & DriverStatics = GcDriver
